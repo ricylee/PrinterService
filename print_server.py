@@ -4,6 +4,7 @@ import win32print
 import win32api
 import win32ui
 import win32con
+import win32gui  # 关键新增：用于更底层的DC创建
 import subprocess
 from datetime import datetime
 import threading
@@ -96,7 +97,11 @@ def create_simple_printer_icon():
     
     return image
 
-def silent_print_pdf(pdf_path, printer_name, copies=1, duplex=1):
+def silent_print_pdf(pdf_path, printer_name, copies=1, duplex=1, orientation=1):
+    """
+    静默打印PDF (修复版)
+    :param orientation: 1 = 纵向 (Portrait), 2 = 横向 (Landscape)
+    """
     if not PYMUPDF_AVAILABLE:
         raise Exception("PyMuPDF未安装，无法使用静默打印")
     
@@ -108,36 +113,66 @@ def silent_print_pdf(pdf_path, printer_name, copies=1, duplex=1):
         hprinter = win32print.OpenPrinter(printer_name)
         
         try:
+            # 1. 获取打印机默认配置
             printer_info = win32print.GetPrinter(hprinter, 2)
-            hdc = win32ui.CreateDC()
-            hdc.CreatePrinterDC(printer_name)
+            devmode = printer_info['pDevMode']
             
+            # 2. 设置打印参数
+            if devmode:
+                # 设置方向
+                devmode.Orientation = orientation
+                # 关键：告诉系统 DM_ORIENTATION 字段是有效的
+                devmode.Fields |= win32con.DM_ORIENTATION
+                
+                # 可以在这里设置纸张大小等其他参数
+                # devmode.PaperSize = win32con.DMPAPER_A4
+                # devmode.Fields |= win32con.DM_PAPERSIZE
+                
+                # 关于份数：
+                # 为了兼容性，我们不在 DevMode 中设置 Copies，而是通过外层循环发送多次作业
+                # 或者由 Python 循环渲染多次页面。
+                # 这样可以避免某些不支持硬件份数的驱动只打一份的问题。
+                devmode.Copies = 1
+                devmode.Fields |= win32con.DM_COPIES
+
+            # 3. 使用 win32gui.CreateDC 直接携带 devmode 创建 DC
+            # 这种方式比先 CreatePrinterDC 再 ResetDC 更稳定
+            hdc_handle = win32gui.CreateDC("WINSPOOL", printer_name, devmode)
+            hdc = win32ui.CreateDCFromHandle(hdc_handle)
+            
+            # 获取实际的可打印区域（此时已经是应用了方向设置后的区域）
             printable_area = hdc.GetDeviceCaps(win32con.HORZRES), hdc.GetDeviceCaps(win32con.VERTRES)
-            printer_size = hdc.GetDeviceCaps(win32con.PHYSICALWIDTH), hdc.GetDeviceCaps(win32con.PHYSICALHEIGHT)
-            printer_margins = hdc.GetDeviceCaps(win32con.PHYSICALOFFSETX), hdc.GetDeviceCaps(win32con.PHYSICALOFFSETY)
             
+            # 软件循环处理份数，确保所有打印机都能正确打印多份
             for copy_num in range(copies):
-                hdc.StartDoc("PDF Silent Print")
+                # StartDoc 传入任务名称
+                hdc.StartDoc(f"PDF Print Task {os.path.basename(pdf_path)}")
                 
                 for page_num in range(len(pdf_doc)):
                     hdc.StartPage()
                     
                     page = pdf_doc[page_num]
-                    mat = fitz.Matrix(2.0, 2.0)
+                    
+                    # 使用 fitz 渲染页面
+                    mat = fitz.Matrix(2.0, 2.0) # 2x 缩放以获得较好清晰度
                     pix = page.get_pixmap(matrix=mat)
                     
                     img_data = pix.tobytes("ppm")
                     img = PILImage.open(io.BytesIO(img_data))
                     
                     img_width, img_height = img.size
+                    
+                    # 计算缩放比例，保持长宽比
                     scale_x = printable_area[0] / img_width
                     scale_y = printable_area[1] / img_height
-                    scale = min(scale_x, scale_y) * 0.9
+                    scale = min(scale_x, scale_y) * 0.95  # 留 5% 边距
                     
                     scaled_width = int(img_width * scale)
                     scaled_height = int(img_height * scale)
-                    x = (printable_area[0] - scaled_width) // 2 + printer_margins[0]
-                    y = (printable_area[1] - scaled_height) // 2 + printer_margins[1]
+                    
+                    # 居中计算
+                    x = (printable_area[0] - scaled_width) // 2
+                    y = (printable_area[1] - scaled_height) // 2
                     
                     if scale != 1.0:
                         img = img.resize((scaled_width, scaled_height), PILImage.Resampling.LANCZOS)
@@ -244,7 +279,6 @@ def convert_text_to_pdf(text_path, output_path, page_size=A4):
         except ImportError:
             pass
         
-        # 如果没有注册成功中文字体，使用Courier字体（等宽字体，对中文兼容性更好）
         if not font_registered:
             try:
                 c.setFont("Courier", 9)
@@ -259,6 +293,7 @@ def convert_text_to_pdf(text_path, output_path, page_size=A4):
         for line in lines:
             if y < 50:
                 c.showPage()
+                # 重置字体
                 if font_registered:
                     for font_name, font_path in chinese_fonts:
                         try:
@@ -285,19 +320,6 @@ def convert_text_to_pdf(text_path, output_path, page_size=A4):
                     line = line[max_chars_per_line:]
                     if y < 50:
                         c.showPage()
-                        if font_registered:
-                            for font_name, font_path in chinese_fonts:
-                                try:
-                                    if os.path.exists(font_path):
-                                        c.setFont(font_name, 10)
-                                        break
-                                except:
-                                    continue
-                        else:
-                            try:
-                                c.setFont("Courier", 9)
-                            except:
-                                c.setFont("Helvetica", 10)
                         y = page_height - 50
                 
                 if line:
@@ -352,11 +374,7 @@ def convert_office_to_pdf_com_silent(office_path, output_path):
                         doc.SaveAs2(abs_output_path, FileFormat=17)
                         success = True
                     except Exception:
-                        try:
-                            doc.SaveAs(abs_output_path, 17)
-                            success = True
-                        except Exception:
-                            pass
+                        pass
                 
                 doc.Close(SaveChanges=False)
                     
@@ -383,11 +401,7 @@ def convert_office_to_pdf_com_silent(office_path, output_path):
                         ws.ExportAsFixedFormat(0, abs_output_path)
                         success = True
                     except Exception:
-                        try:
-                            wb.SaveAs(abs_output_path, 57)
-                            success = True
-                        except Exception:
-                            pass
+                        pass
                 
                 wb.Close(SaveChanges=False)
                     
@@ -397,7 +411,6 @@ def convert_office_to_pdf_com_silent(office_path, output_path):
         elif ext in ['ppt', 'pptx']:
             try:
                 ppt = comtypes.client.CreateObject('PowerPoint.Application')
-                
                 try:
                     ppt.Visible = 0
                 except Exception:
@@ -415,15 +428,7 @@ def convert_office_to_pdf_com_silent(office_path, output_path):
                             presentation.SaveAs(abs_output_path, 32)
                             success = True
                         except Exception:
-                            try:
-                                presentation.Export(abs_output_path, "PDF")
-                                success = True
-                            except Exception:
-                                try:
-                                    presentation.SaveAs(abs_output_path)
-                                    success = True
-                                except Exception:
-                                    pass
+                            pass
                     
                     try:
                         presentation.Close()
@@ -523,7 +528,25 @@ os.makedirs(PDF_FOLDER, exist_ok=True)
 if not os.path.exists(STATIC_FOLDER):
     os.makedirs(STATIC_FOLDER, exist_ok=True)
 
-PRINTERS = [p[2] for p in win32print.EnumPrinters(2)]
+# ----------------- 修改开始：打印机排序 -----------------
+def get_printers_ordered():
+    # 1. 获取所有打印机名称
+    printers = [p[2] for p in win32print.EnumPrinters(2)]
+    try:
+        # 2. 获取系统默认打印机名称
+        default_printer = win32print.GetDefaultPrinter()
+        
+        # 3. 如果默认打印机在列表中，将其移动到第一位
+        if default_printer in printers:
+            printers.remove(default_printer)
+            printers.insert(0, default_printer)
+    except Exception as e:
+        print(f"获取默认打印机失败: {e}")
+    
+    return printers
+
+PRINTERS = get_printers_ordered()
+# ----------------- 修改结束 -----------------
 
 ALLOWED_EXT = {
     'pdf', 'jpg', 'jpeg', 'png', 'bmp', 'gif', 'tiff',
@@ -534,9 +557,10 @@ ALLOWED_EXT = {
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXT
 
-def log_print(filename, printer, copies, duplex, papersize, quality, status="成功"):
+def log_print(filename, printer, copies, duplex, papersize, quality, status="成功", orientation=1):
+    orient_str = "纵向" if orientation == 1 else "横向"
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
-        f.write(f"{datetime.now()} 打印: {filename} 打印机: {printer} 份数: {copies} 双面: {duplex} 纸张: {papersize} 质量: {quality} 状态: {status}\n")
+        f.write(f"{datetime.now()} 打印: {filename} 打印机: {printer} 份数: {copies} 双面: {duplex} 方向: {orient_str} 状态: {status}\n")
 
 def get_logs():
     if not os.path.exists(LOG_FILE):
@@ -625,10 +649,12 @@ def print_single():
     data = request.get_json()
     filename = data.get('filename')
     printer = data.get('printer')
-    copies = data.get('copies', 1)
-    duplex = data.get('duplex', 1)
+    copies = int(data.get('copies', 1))
+    duplex = int(data.get('duplex', 1))
     paper_size = data.get('paper_size', 'A4')
     quality = data.get('quality', 'normal')
+    # 获取方向参数: 1 为纵向, 2 为横向
+    orientation = int(data.get('orientation', 1)) 
     
     try:
         name, ext = os.path.splitext(filename)
@@ -639,8 +665,8 @@ def print_single():
             return jsonify({'success': False, 'message': '文件未转换为PDF，无法静默打印'})
         
         try:
-            silent_print_pdf(pdf_path, printer, copies, duplex)
-            log_print(filename, printer, copies, duplex, paper_size, quality, "静默打印成功")
+            silent_print_pdf(pdf_path, printer, copies, duplex, orientation=orientation)
+            log_print(filename, printer, copies, duplex, paper_size, quality, "静默打印成功", orientation=orientation)
             return jsonify({'success': True, 'message': '静默打印成功'})
         except Exception as e:
             if PYMUPDF_AVAILABLE:
@@ -648,22 +674,23 @@ def print_single():
             else:
                 error_msg = "PyMuPDF未安装，无法静默打印"
             
-            log_print(filename, printer, copies, duplex, paper_size, quality, error_msg)
+            log_print(filename, printer, copies, duplex, paper_size, quality, error_msg, orientation=orientation)
             return jsonify({'success': False, 'message': error_msg})
             
     except Exception as e:
         error_msg = f"打印失败: {str(e)}"
-        log_print(filename, printer, copies, duplex, paper_size, quality, error_msg)
+        log_print(filename, printer, copies, duplex, paper_size, quality, error_msg, orientation=orientation)
         return jsonify({'success': False, 'message': error_msg})
 
 @app.route('/print_all', methods=['POST'])
 def print_all():
     data = request.get_json()
     printer = data.get('printer')
-    copies = data.get('copies', 1)
-    duplex = data.get('duplex', 1)
+    copies = int(data.get('copies', 1))
+    duplex = int(data.get('duplex', 1))
     paper_size = data.get('paper_size', 'A4')
     quality = data.get('quality', 'normal')
+    orientation = int(data.get('orientation', 1))
     
     if not PYMUPDF_AVAILABLE:
         return jsonify({'success': False, 'message': 'PyMuPDF未安装，无法静默打印'})
@@ -676,11 +703,11 @@ def print_all():
         for file_info in files:
             if file_info['pdf_path'] and os.path.exists(file_info['pdf_path']):
                 try:
-                    silent_print_pdf(file_info['pdf_path'], printer, copies, duplex)
-                    log_print(file_info['name'], printer, copies, duplex, paper_size, quality, "静默批量打印成功")
+                    silent_print_pdf(file_info['pdf_path'], printer, copies, duplex, orientation=orientation)
+                    log_print(file_info['name'], printer, copies, duplex, paper_size, quality, "静默批量打印成功", orientation=orientation)
                     printed_count += 1
                 except Exception as e:
-                    log_print(file_info['name'], printer, copies, duplex, paper_size, quality, f"静默批量打印失败: {str(e)}")
+                    log_print(file_info['name'], printer, copies, duplex, paper_size, quality, f"静默批量打印失败: {str(e)}", orientation=orientation)
                     failed_count += 1
         
         if printed_count > 0:
@@ -785,7 +812,21 @@ def build_menu(icon):
     )
 
 def setup_tray():
-    image = create_simple_printer_icon()
+    # 尝试加载外部图标文件
+    icon_filename = 'printer.ico'
+    icon_path = get_resource_path(icon_filename)
+    
+    if os.path.exists(icon_path):
+        try:
+            # 如果文件存在，使用文件图标
+            image = PILImage.open(icon_path)
+        except Exception:
+            # 加载失败则回退到手绘图标
+            image = create_simple_printer_icon()
+    else:
+        # 文件不存在则使用手绘图标
+        image = create_simple_printer_icon()
+
     icon = pystray.Icon('print_server', image, '内网打印服务(静默版)')
     icon.menu = build_menu(icon)
     icon.run()
