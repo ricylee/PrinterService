@@ -2,7 +2,7 @@
 
 > 一个简单易用的内网打印解决方案，让您可以通过浏览器打印文档，解决一些电脑实在连不上打印机的问题
 
-<img width="834" height="784" alt="image" src="https://github.com/user-attachments/assets/d3702780-8377-4ded-8138-211254614f60" />
+<img width="834" height="784" alt="image" src="https://github.com/ricylee/PrinterService/blob/master/image/image.png"/>
 
 原项目地址：https://github.com/a937750307/lan-printing
 
