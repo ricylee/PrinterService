@@ -233,7 +233,9 @@
                         <label class="form-label">选择打印机</label>
                         <select id="printerSelect" class="form-select">
                             {% for p in printers %}
-                                <option value="{{p}}">{{p}}</option>
+                                <option value="{{p}}">
+                                    {{ p }} {% if loop.index0 == 0 %}(默认){% endif %}
+                                </option>
                             {% endfor %}
                         </select>
                     </div>
@@ -245,7 +247,16 @@
                         <label class="form-label">纸张大小</label>
                         <input type="text" id="paperSizeInput" value="A4" class="form-control">
                     </div>
-                    <div class="col-12">
+                    
+                    <div class="col-6">
+                        <label class="form-label">打印方向</label>
+                        <select id="orientationSelect" class="form-select">
+                            <option value="1">纵向 (Portrait)</option>
+                            <option value="2">横向 (Landscape)</option>
+                        </select>
+                    </div>
+
+                    <div class="col-6">
                         <label class="form-label">单双面</label>
                         <select id="duplexSelect" class="form-select">
                             <option value="1">单面</option>
@@ -253,8 +264,9 @@
                             <option value="3">短边翻转双面</option>
                         </select>
                     </div>
+                    
                     <div class="col-12">
-                        <button id="printAllBtn" class="btn btn-success w-100">静默打印全部PDF文件</button>
+                        <button id="printAllBtn" class="btn btn-success w-100" style="display: none;">静默打印全部PDF文件</button>
                     </div>
                 </div>
             </div>
@@ -418,6 +430,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const copies = document.getElementById('copiesInput').value;
         const duplex = document.getElementById('duplexSelect').value;
         const paperSize = document.getElementById('paperSizeInput').value;
+        const orientation = document.getElementById('orientationSelect').value;
         
         fetch('/print_single', {
             method: 'POST',
@@ -428,6 +441,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 copies: parseInt(copies),
                 duplex: parseInt(duplex),
                 paper_size: paperSize,
+                orientation: parseInt(orientation),
                 quality: 'normal'
             })
         })
@@ -450,6 +464,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const copies = document.getElementById('copiesInput').value;
         const duplex = document.getElementById('duplexSelect').value;
         const paperSize = document.getElementById('paperSizeInput').value;
+        const orientation = document.getElementById('orientationSelect').value;
         
         fetch('/print_all', {
             method: 'POST',
@@ -459,6 +474,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 copies: parseInt(copies),
                 duplex: parseInt(duplex),
                 paper_size: paperSize,
+                orientation: parseInt(orientation),
                 quality: 'normal'
             })
         })
